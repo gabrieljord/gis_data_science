@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from PIL import Image
 import inference as model
-
+from ocr import extract_text
 
 infre = model.Inference()
 infre.load_model()
@@ -38,6 +38,17 @@ for score, label, box in zip(results["scores"], results["labels"], results["boxe
     score = score.item()
     print(f"- Detected '{label}' with confidence {score:.3f}")
     
+    # If the detected object is a tag, run OCR
+    if "tag" in label:
+        # We want the tightest possible bounding box to avoid stray numbers on the pole
+        left, top, right, bottom = box[0], box[1], box[2], box[3]
+        
+        cropped_tag = image.crop((left, top, right, bottom))
+        extracted_text = extract_text(cropped_tag)
+        print(f"  *** OCR Extracted Text: {extracted_text}")
+        if extracted_text.strip():
+            label = f"{label} [{extracted_text}]"
+            
     # Draw rectangle
     rect = patches.Rectangle(
         (box[0], box[1]), box[2] - box[0], box[3] - box[1], 
