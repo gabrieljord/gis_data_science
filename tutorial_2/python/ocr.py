@@ -1,66 +1,72 @@
-import easyocr
-import numpy as np
-from PIL import ImageEnhance
+import torch
+from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+from PIL import Image, ImageOps
+import re
 
-# Initialize the reader once
-reader = easyocr.Reader(['en'], gpu=False)
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+model_id = "Qwen/Qwen2-VL-2B-Instruct"
+
+# Initialize model and processor once to avoid reloading on every inference
+print(f"Loading {model_id} for OCR...")
+model = Qwen2VLForConditionalGeneration.from_pretrained(
+    model_id, torch_dtype=torch_dtype
+).to(device)
+processor = AutoProcessor.from_pretrained(model_id)
+print("OCR Model loaded.")
 
 def extract_text(cropped_pil_image):
     """
-    Takes a cropped PIL Image and performs OCR using EasyOCR.
-    Handles both horizontal and vertically-stacked text.
+    Takes a cropped PIL Image and performs OCR using Qwen2-VL.
+    Handles vertically-stacked text by padding to square and prompting carefully.
     """
-    # 1. Upscale the image slightly if it's very small
-    width, height = cropped_pil_image.size
-    if width < 150 or height < 150:
-        # Use high quality LANCZOS resampling to reduce blur
-        cropped_pil_image = cropped_pil_image.resize((width * 3, height * 3), resample=3)
+    if cropped_pil_image.mode != "RGB":
+        cropped_pil_image = cropped_pil_image.convert("RGB")
         
-    # User requested: Rotate the image 90 degrees counter-clockwise
-    cropped_pil_image = cropped_pil_image.rotate(90, expand=True)
+    # Pad the crop to a square. Qwen2-VL works much better when it has square context 
+    # instead of an extremely thin vertical sliver where letters look distorted.
+    width, height = cropped_pil_image.size
+    new_size = max(width, height)
+    delta_w = new_size - width
+    delta_h = new_size - height
+    padding = (delta_w//2, delta_h//2, delta_w-(delta_w//2), delta_h-(delta_h//2))
+    padded_img = ImageOps.expand(cropped_pil_image, padding, fill=(255, 255, 255))
 
-    # Enhance sharpness and contrast for the blurry text
-    enhancer = ImageEnhance.Sharpness(cropped_pil_image)
-    cropped_pil_image = enhancer.enhance(3.0) # Sharpen aggressively
+    # DEBUG: Save the padded crop
+    padded_img.save("debug_padded_crop.png")
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": "What is the vertical text written on the yellow tag in the center? Please output the characters from top to bottom."},
+            ],
+        }
+    ]
     
-    enhancer_cont = ImageEnhance.Contrast(cropped_pil_image)
-    cropped_pil_image = enhancer_cont.enhance(1.5) # Slight contrast boost
-
-    # DEBUG: Save the cropped and upscaled image to disk
-    cropped_pil_image.save("debug_crop.png")
-
-    img_array = np.array(cropped_pil_image)
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     
-    # 2. Read text using EasyOCR
-    # Add rotation_info so EasyOCR actively tries to read it sideways and upside down too, 
-    # taking the highest confidence result.
-    results = reader.readtext(
-        img_array,
-        allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-        rotation_info=[90, 180, 270],
-        text_threshold=0.1,
-        low_text=0.1,
-        mag_ratio=1.5
-    )
+    inputs = processor(
+        text=[text], 
+        images=[padded_img], 
+        padding=True, 
+        return_tensors="pt"
+    ).to(device, torch_dtype)
     
-    if not results:
-        return ""
-
-    # 3. Determine if the tag is vertical or horizontal based on its aspect ratio
-    is_vertical = height > width
-
-    text_data = []
-    for bbox, text, conf in results:
-        # Calculate the center (x, y) of each detected text box
-        center_x = sum([pt[0] for pt in bbox]) / 4
-        center_y = sum([pt[1] for pt in bbox]) / 4
-        text_data.append((center_x, center_y, text))
+    generated_ids = model.generate(**inputs, max_new_tokens=20)
+    generated_ids_trimmed = [
+        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
     
-    # 4. Sort the text intelligently
-    # Because we rotated the image 90 degrees CCW, what used to be top-to-bottom
-    # is now left-to-right! So we sort by the X coordinate.
-    text_data.sort(key=lambda item: (round(item[0] / 5), item[1]))
-
-    # Join the sorted text fragments
-    detected_texts = [item[2] for item in text_data]
-    return "".join(detected_texts)
+    output_text = processor.batch_decode(
+        generated_ids_trimmed, 
+        skip_special_tokens=True, 
+        clean_up_tokenization_spaces=False
+    )[0].strip()
+    
+    # Strip any extra quotes or periods it might have added
+    output_text = re.sub(r'[^A-Za-z0-9]', '', output_text)
+    
+    return output_text
