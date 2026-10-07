@@ -1,18 +1,62 @@
-from ultralytics import YOLOWorld
+import torch
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from PIL import Image
+from transformers import GroundingDinoForObjectDetection, GroundingDinoProcessor
 
-# 1. Load the pre-trained zero-shot model
-# Note: 'v2' models support exporting to edge devices later
-model = YOLOWorld('yolov8x-worldv2.pt')
+# 1. Load the Grounding DINO model from HuggingFace
+print("Loading Grounding DINO model...")
+model_id = "IDEA-Research/grounding-dino-tiny"
+processor = GroundingDinoProcessor.from_pretrained(model_id)
+model = GroundingDinoForObjectDetection.from_pretrained(model_id)
+model.eval()
 
-# 2. Tell the LLM exactly what to search for using text prompts
-model.set_classes(["utility_pole","yellow tag", "silver metal plate", "sticker",     
-  "wooden pole"])
+# 2. Load the image
+image_path = "../data/images/pole.png"
+print(f"Processing image: {image_path}")
+image = Image.open(image_path).convert("RGB")
 
-# 3. Run inference on your image (lowering confidence threshold to find more objects)
-results = model.predict("../data/images/pole.png", conf=0.07)
+# 3. Define text prompts (must be lower case and separated by periods for Grounding DINO)
+text_prompt = "utility pole . pole_tag ."
+print(f"Searching for: {text_prompt}")
 
-# 4. Show and save the detected objects
-results[0].show()
-results[0].save(filename="prediction_result.png")
-print("Results saved to prediction_result.png")
-print(results[0])
+# 4. Prepare inputs and run inference
+inputs = processor(images=image, text=text_prompt, return_tensors="pt")
+with torch.no_grad():
+    outputs = model(**inputs)
+
+# 5. Post-process to extract bounding boxes
+results = processor.post_process_grounded_object_detection(
+    outputs,
+    inputs.input_ids,
+    threshold=0.2,        # Minimum confidence for a box
+    text_threshold=0.25,  # Minimum confidence for text matching
+    target_sizes=[image.size[::-1]]
+)[0]
+
+print("\n--- Detections ---")
+# 6. Visualize the results in a window!
+fig, ax = plt.subplots(1, figsize=(10, 8))
+ax.imshow(image)
+ax.axis('off')
+
+for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
+    box = box.tolist()
+    score = score.item()
+    print(f"- Detected '{label}' with confidence {score:.3f}")
+    
+    # Draw rectangle
+    rect = patches.Rectangle(
+        (box[0], box[1]), box[2] - box[0], box[3] - box[1], 
+        linewidth=2, edgecolor='red', facecolor='none'
+    )
+    ax.add_patch(rect)
+    # Add label text
+    ax.text(box[0], max(0, box[1] - 5), f"{label}: {score:.2f}", 
+            color='white', fontsize=12, bbox=dict(facecolor='red', alpha=0.5))
+
+plt.title("Grounding DINO Detections")
+plt.tight_layout()
+plt.savefig("prediction_result_dino.png")
+print("\nSaved image to prediction_result_dino.png")
+plt.show()
