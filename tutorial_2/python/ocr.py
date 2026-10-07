@@ -17,31 +17,26 @@ processor = AutoProcessor.from_pretrained(model_id)
 print("OCR Model loaded.")
 
 def extract_text(cropped_pil_image):
-    """
-    Takes a cropped PIL Image and performs OCR using Qwen2-VL.
-    Handles vertically-stacked text by padding to square and prompting carefully.
-    """
     if cropped_pil_image.mode != "RGB":
         cropped_pil_image = cropped_pil_image.convert("RGB")
         
-    # Pad the crop to a square. Qwen2-VL works much better when it has square context 
-    # instead of an extremely thin vertical sliver where letters look distorted.
+    # The cropped image is a very thin sliver. We stretch the image horizontally 
+    # so it's wider (width = height // 2). This makes the characters look fat, 
+    # but gives the model plenty of pixels to look at!
     width, height = cropped_pil_image.size
-    new_size = max(width, height)
-    delta_w = new_size - width
-    delta_h = new_size - height
-    padding = (delta_w//2, delta_h//2, delta_w-(delta_w//2), delta_h-(delta_h//2))
-    padded_img = ImageOps.expand(cropped_pil_image, padding, fill=(255, 255, 255))
+    new_width = height // 2
+    stretched_img = cropped_pil_image.resize((new_width, height), Image.Resampling.LANCZOS)
+    
+    # Save debug image
+    stretched_img.save("debug_qwen_stretched.png")
 
-    # DEBUG: Save the padded crop
-    padded_img.save("debug_padded_crop.png")
-
+    # STRICT CONSTRAINED PROMPT
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "image"},
-                {"type": "text", "text": "What is the vertical text written on the yellow tag in the center? Please output the characters from top to bottom."},
+                {"type": "text", "text": "This is a utility pole serial number stacked vertically. The format is EXACTLY 2 uppercase letters followed by 4 digits. Extract the 6-character serial number. Output ONLY the 6 alphanumeric characters."},
             ],
         }
     ]
@@ -50,7 +45,7 @@ def extract_text(cropped_pil_image):
     
     inputs = processor(
         text=[text], 
-        images=[padded_img], 
+        images=[stretched_img], 
         padding=True, 
         return_tensors="pt"
     ).to(device, torch_dtype)
@@ -66,7 +61,9 @@ def extract_text(cropped_pil_image):
         clean_up_tokenization_spaces=False
     )[0].strip()
     
-    # Strip any extra quotes or periods it might have added
+    print(f"  *** Raw Qwen output: {output_text}")
+    
+    # Strip everything except alphanumeric characters
     output_text = re.sub(r'[^A-Za-z0-9]', '', output_text)
     
     return output_text
