@@ -1,41 +1,34 @@
-import torch
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from PIL import Image
-from transformers import GroundingDinoForObjectDetection, GroundingDinoProcessor
+import inference as model
 
-# 1. Load the Grounding DINO model from HuggingFace
-print("Loading Grounding DINO model...")
-model_id = "IDEA-Research/grounding-dino-tiny"
-processor = GroundingDinoProcessor.from_pretrained(model_id)
-model = GroundingDinoForObjectDetection.from_pretrained(model_id)
-model.eval()
 
-# 2. Load the image
+infre = model.Inference()
+infre.load_model()
+
+#Load the image
 image_path = "../data/images/pole.png"
 print(f"Processing image: {image_path}")
 image = Image.open(image_path).convert("RGB")
 
-# 3. Define text prompts (must be lower case and separated by periods for Grounding DINO)
+#Define text prompts (must be lower case and separated by periods for Grounding DINO)
 text_prompt = "utility pole . pole_tag ."
 print(f"Searching for: {text_prompt}")
 
-# 4. Prepare inputs and run inference
-inputs = processor(images=image, text=text_prompt, return_tensors="pt")
-with torch.no_grad():
-    outputs = model(**inputs)
+outputs = infre.preprocess(image=image,text_prompt=text_prompt)
 
-# 5. Post-process to extract bounding boxes
-results = processor.post_process_grounded_object_detection(
+#Post-process to extract bounding boxes
+results = infre.processor.post_process_grounded_object_detection(
     outputs,
-    inputs.input_ids,
+    infre.inputs.input_ids,
     threshold=0.2,        # Minimum confidence for a box
     text_threshold=0.25,  # Minimum confidence for text matching
     target_sizes=[image.size[::-1]]
 )[0]
 
 print("\n--- Detections ---")
-# 6. Visualize the results in a window!
+#Visualize the results in a window!
 fig, ax = plt.subplots(1, figsize=(10, 8))
 ax.imshow(image)
 ax.axis('off')
