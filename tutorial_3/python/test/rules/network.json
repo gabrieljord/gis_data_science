@@ -1,0 +1,26 @@
+[
+  {
+    "id": "RULE_001_NO_DANGLING_SPANS",
+    "description": "Every span endpoint must snap to a network node within 0.1 meters.",
+    "severity": "ERROR",
+    "query": "WITH endpoints AS (\n    SELECT \n        id AS span_id,\n        name,\n        ST_StartPoint(geom) AS start_pt,\n        ST_EndPoint(geom) AS end_pt\n    FROM spans\n)\nSELECT \n    e.span_id,\n    e.name,\n    'Start or end point not connected to any node' AS failure_reason\nFROM endpoints e\nWHERE NOT EXISTS (\n    SELECT 1 FROM nodes n \n    WHERE ST_DWithin(e.start_pt::geography, n.geom::geography, 0.1)\n)\nOR NOT EXISTS (\n    SELECT 1 FROM nodes n \n    WHERE ST_DWithin(e.end_pt::geography, n.geom::geography, 0.1)\n);"
+  },
+  {
+    "id": "RULE_004_INVALID_CABLE_HIERARCHY",
+    "description": "Feeder cables cannot terminate directly at a premise location.",
+    "severity": "ERROR",
+    "query": "WITH feeder_endpoints AS (\n    SELECT \n        id AS cable_id,\n        ST_EndPoint(geom) AS end_pt\n    FROM cables\n    WHERE type = 'FEEDER'\n)\nSELECT \n    f.cable_id,\n    'Feeder cable illegally terminated at premise ' || p.id AS failure_reason\nFROM feeder_endpoints f\nJOIN premises p \n  ON ST_DWithin(f.end_pt::geography, p.geom::geography, 0.1);"
+  },
+  {
+    "id": "RULE_005_PORT_CAPACITY_EXCEEDED",
+    "description": "Splitters cannot have more connected drops than max_ports.",
+    "severity": "ERROR",
+    "query": "WITH connections AS (\n    SELECT \n        e.id AS equip_id,\n        e.max_ports,\n        COUNT(c.id) AS connected_drops\n    FROM equipment e\n    JOIN cables c \n      ON ST_DWithin(e.geom::geography, ST_StartPoint(c.geom)::geography, 0.1)\n      OR ST_DWithin(e.geom::geography, ST_EndPoint(c.geom)::geography, 0.1)\n    WHERE c.type = 'DROP'\n    GROUP BY e.id, e.max_ports\n)\nSELECT \n    equip_id,\n    'Capacity exceeded: ' || connected_drops || ' drops on a ' || max_ports || ' port splitter' AS failure_reason\nFROM connections\nWHERE connected_drops > max_ports;"
+  },
+  {
+    "id": "RULE_010_EQUIPMENT_HAS_PORTS",
+    "description": "All equipment must have a valid max_ports assignment greater than 0.",
+    "severity": "WARNING",
+    "query": "SELECT id AS equip_id, type, 'Equipment has invalid max_ports' AS failure_reason FROM equipment WHERE max_ports <= 0 OR max_ports IS NULL;"
+  }
+]

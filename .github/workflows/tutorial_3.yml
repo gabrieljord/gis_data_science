@@ -1,0 +1,49 @@
+name: Spatial QA/QC Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  spatial-tests:
+    runs-on: ubuntu-latest
+    
+    # 1. Spin up the PostGIS database container
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: ${{ vars.DB_NAME }}
+          POSTGRES_USER: ${{ vars.DB_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        ports:
+          - 5432:5432
+        # Health check ensures the DB is ready before Python tries to connect
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest psycopg[binary] shapely
+
+      - name: Run Spatial Rules Engine
+        env:
+          # Dynamically construct the URI using Secrets and Vars
+          DB_URI: postgresql://${{ vars.DB_USER }}:${{ secrets.DB_PASSWORD }}@localhost:5432/${{ vars.DB_NAME }}
+        run: |
+          pytest -v test_spatial_qa.py

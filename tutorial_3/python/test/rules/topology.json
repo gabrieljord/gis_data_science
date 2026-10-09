@@ -1,0 +1,26 @@
+[
+  {
+    "id": "RULE_001_NO_DANGLING_SPANS",
+    "description": "Every span endpoint must snap to a network node within 0.1 meters.",
+    "severity": "ERROR",
+    "query": "WITH endpoints AS (SELECT id AS span_id, name, ST_StartPoint(geom) AS start_pt, ST_EndPoint(geom) AS end_pt FROM spans) SELECT e.span_id, e.name, 'Start or end point not connected to any node' AS failure_reason FROM endpoints e WHERE NOT EXISTS (SELECT 1 FROM nodes n WHERE ST_DWithin(e.start_pt::geography, n.geom::geography, 0.1)) OR NOT EXISTS (SELECT 1 FROM nodes n WHERE ST_DWithin(e.end_pt::geography, n.geom::geography, 0.1));"
+  },
+  {
+    "id": "RULE_002_MINIMUM_SPAN_LENGTH",
+    "description": "Spans must exceed 1.0 meter to prevent digitizing artifacts.",
+    "severity": "ERROR",
+    "query": "SELECT id AS span_id, name, ROUND(ST_Length(geom::geography)::numeric, 2) || 'm is below minimum threshold (1.0m)' AS failure_reason FROM spans WHERE ST_Length(geom::geography) < 1.0;"
+  },
+  {
+    "id": "RULE_004_INVALID_CABLE_HIERARCHY",
+    "description": "Feeder cables cannot terminate directly at a premise location.",
+    "severity": "ERROR",
+    "query": "WITH feeder_endpoints AS (SELECT id AS cable_id, ST_EndPoint(geom) AS end_pt FROM cables WHERE type = 'FEEDER') SELECT f.cable_id, 'Feeder cable illegally terminated at premise ' || p.id AS failure_reason FROM feeder_endpoints f JOIN premises p ON ST_DWithin(f.end_pt::geography, p.geom::geography, 0.1);"
+  },
+  {
+    "id": "RULE_006_MISSING_VAULT_CONTAINMENT",
+    "description": "Underground equipment must be placed inside a vault polygon.",
+    "severity": "WARNING",
+    "query": "SELECT e.id AS equip_id, 'Equipment is not contained within any vault boundary' AS failure_reason FROM equipment e LEFT JOIN vaults v ON ST_Intersects(e.geom, v.geom) WHERE v.id IS NULL;"
+  }
+]

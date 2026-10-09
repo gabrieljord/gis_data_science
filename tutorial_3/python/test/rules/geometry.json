@@ -1,0 +1,38 @@
+[
+  {
+    "id": "RULE_002_MINIMUM_SPAN_LENGTH",
+    "description": "Spans must exceed 1.0 meter to prevent digitizing artifacts.",
+    "severity": "ERROR",
+    "query": "SELECT \n    id AS span_id,\n    name,\n    ROUND(ST_Length(geom::geography)::numeric, 2) || 'm is below minimum threshold (1.0m)' AS failure_reason\nFROM spans\nWHERE ST_Length(geom::geography) < 1.0;"
+  },
+  {
+    "id": "RULE_003_NO_DUPLICATE_SPANS",
+    "description": "No two spans can share identical geometry.",
+    "severity": "WARNING",
+    "query": "SELECT \n    s1.id AS span_id,\n    s1.name,\n    'Duplicate geometry with span id ' || s2.id AS failure_reason\nFROM spans s1\nJOIN spans s2 \n  ON s1.id < s2.id \n AND ST_Equals(s1.geom, s2.geom);"
+  },
+  {
+    "id": "RULE_006_MISSING_VAULT_CONTAINMENT",
+    "description": "Underground equipment must be placed inside a vault polygon.",
+    "severity": "WARNING",
+    "query": "SELECT \n    e.id AS equip_id,\n    'Equipment is not contained within any vault boundary' AS failure_reason\nFROM equipment e\nLEFT JOIN vaults v \n  ON ST_Intersects(e.geom, v.geom)\nWHERE v.id IS NULL;"
+  },
+  {
+    "id": "RULE_007_VALID_NODE_GEOMETRY",
+    "description": "All nodes must have a valid POINT geometry.",
+    "severity": "ERROR",
+    "query": "SELECT id AS node_id, name, 'Invalid geometry type' AS failure_reason FROM nodes WHERE NOT ST_IsValid(geom) OR GeometryType(geom) != 'POINT';"
+  },
+  {
+    "id": "RULE_008_VAULT_IS_POLYGON",
+    "description": "All vaults must be valid polygons.",
+    "severity": "ERROR",
+    "query": "SELECT id AS vault_id, name, 'Vault is not a valid polygon' AS failure_reason FROM vaults WHERE NOT ST_IsValid(geom) OR GeometryType(geom) != 'POLYGON';"
+  },
+  {
+    "id": "RULE_009_CABLE_HAS_LENGTH",
+    "description": "All cables must have a length greater than 0.",
+    "severity": "ERROR",
+    "query": "SELECT id AS cable_id, type, 'Cable has 0 length' AS failure_reason FROM cables WHERE ST_Length(geom::geography) = 0;"
+  }
+]
