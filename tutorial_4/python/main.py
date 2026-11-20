@@ -1,7 +1,7 @@
 """
 Predicted-path overlay that follows the arc of the road.
 Real-time LineString pixel route mapping in a separate window with dynamic optical flow speed tracking.
-Keys:  q = quit, c = toggle tracked corners, b = toggle BEV, s = save route GeoJSON, r = reset route
+Keys:  q = quit, c = toggle tracked corners, s = save route GeoJSON, r = reset route
 """
 
 import json
