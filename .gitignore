@@ -1,2 +1,4 @@
 *.pt
 python/weights/*
+tutorial_4/data/*
+main.cpy*
