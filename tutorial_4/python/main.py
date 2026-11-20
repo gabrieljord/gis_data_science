@@ -1,7 +1,7 @@
 """
 Predicted-path overlay that follows the arc of the road.
-Real-time LineString pixel route mapping in a separate window with dynamic optical flow speed tracking.
-Keys:  q = quit, c = toggle tracked corners, s = save route GeoJSON, r = reset route
+Real-time LineString pixel route mapping in a separate window with real forward translation and pose accumulation.
+Keys:  q = quit, c = toggle tracked corners, b = toggle BEV, s = save route GeoJSON, r = reset route
 """
 
 import json
@@ -9,6 +9,8 @@ import math
 from pathlib import Path
 import queue
 import threading
+import PIL import Image
+from PIL.ExifTags import TAGS
 
 import cv2
 import numpy as np
@@ -20,7 +22,7 @@ except ImportError:
     HAS_SHAPELY = False
 
 DEFAULT_VIDEO = Path(__file__).resolve().parent.parent / "data" / "test.mp4"
-VIDEO_PATH = str(DEFAULT_VIDEO if DEFAULT_VIDEO.exists() else Path(r""))
+VIDEO_PATH = str(DEFAULT_VIDEO if DEFAULT_VIDEO.exists() else Path(r"/home/blujay/code/gis_data_science/tutorial_4/data/test.mp4"))
 
 W, H = 1920, 1080
 WINDOW_SIZE = (1280, 720)
@@ -45,7 +47,6 @@ ALPHA_NEAR, ALPHA_FAR = 0.55, 0.10
 KAPPA_MAX = 0.02                     
 
 YAW_EMA = 0.08                        
-SPEED_EMA = 0.12                      # smoothing factor for optical flow speed
 MIN_TRACKED = 60                      
 MIN_USED = 15                         # need this many good tracks to update
 
@@ -108,9 +109,17 @@ class EgoMotion:
         self.prev_crop = None
         self.pts = np.empty((0, 1, 2), np.float32)
         self.yaw = 0.0                                   # rad per frame (+ = turning right)
-        self.speed_mps = 0.0                             # dynamically estimated speed (m/s)
         self.step = 0.0                                  # forward displacement this frame (m)
+        self.x = 0.0                                     # accumulated metric pose X (m)
+        self.y = 0.0                                     # accumulated metric pose Y (m)
+        self.heading = 0.0                               # accumulated heading angle (rad)
+        self.trajectory = []                             # buffer of (x, y, heading, dz, psi)
         self.n_used = 0
+
+    @property
+    def speed_mps(self):
+        """Current speed in m/s."""
+        return self.step * self.fps
 
     @property
     def speed_kmh(self):
@@ -148,11 +157,7 @@ class EgoMotion:
             self.pts = (nxt[good] + off).reshape(-1, 1, 2)
             self._estimate((p0[good] + off).reshape(-1, 2), self.pts.reshape(-1, 2))
         else:
-            # Decay speed when tracking is lost
-            self.speed_mps *= (1.0 - SPEED_EMA)
-            if self.speed_mps < 0.25:
-                self.speed_mps = 0.0
-            self.step = self.speed_mps / self.fps
+            self.step = 0.0
 
         if len(self.pts) < MIN_TRACKED:
             self._detect(crop)
@@ -164,38 +169,20 @@ class EgoMotion:
         ok = (z0 > Z_NEAR * 0.9) & (z0 < Z_TRACK_FAR * 1.1) & (g1[:, 1] > 1)
         self.n_used = int(ok.sum())
         if self.n_used < MIN_USED:
-            self.speed_mps *= (1.0 - SPEED_EMA)
-            if self.speed_mps < 0.25:
-                self.speed_mps = 0.0
-            self.step = self.speed_mps / self.fps
+            self.step = 0.0
             return
+        g0, g1 = g0[ok], g1[ok]
 
-        g0_ok, g1_ok = g0[ok], g1[ok]
+        dz = float(np.clip(np.median(g0[:, 1] - g1[:, 1]), 0.0, 3.0))
+        psi = float(np.median(-(g1[:, 0] - g0[:, 0]) / g0[:, 1]))
 
-        # 1. Yaw angle estimation
-        psi = np.median(-(g1_ok[:, 0] - g0_ok[:, 0]) / g0_ok[:, 1])
         self.yaw += YAW_EMA * (psi - self.yaw)
+        self.step = dz
 
-        # 2. Dynamic Speed estimation from ground optical flow displacement (dz)
-        # Focus on reliable ground points in the near-to-mid range
-        near_mask = (g0_ok[:, 1] >= Z_NEAR) & (g0_ok[:, 1] <= 35.0) & (g1_ok[:, 1] > 1.5)
-        if near_mask.sum() >= 10:
-            dz = g0_ok[near_mask, 1] - g1_ok[near_mask, 1]
-            med_dz = float(np.median(dz))
-            # 0.02 m/frame threshold rejects camera vibrations while vehicle is stopped
-            if med_dz > 0.02:
-                raw_speed = min(med_dz * self.fps, 45.0)
-            else:
-                raw_speed = 0.0
-            self.speed_mps += SPEED_EMA * (raw_speed - self.speed_mps)
-        else:
-            self.speed_mps *= (1.0 - SPEED_EMA)
-
-        # Deadband threshold to eliminate drift at rest
-        if self.speed_mps < 0.25:
-            self.speed_mps = 0.0
-
-        self.step = self.speed_mps / self.fps
+        self.heading += psi
+        self.x += dz * np.sin(self.heading)
+        self.y += dz * np.cos(self.heading)
+        self.trajectory.append((self.x, self.y, self.heading, dz, psi))
 
 
 class PixelRouteMap:
@@ -229,29 +216,33 @@ class PixelRouteMap:
         self.view_scale = 3.0       # pixels per metre
         self.initialized_view = False
 
-    def update(self, yaw_rate, step_dist, speed_mps=0.0):
+    def update(self, *args, **kwargs):
         """
-        Update vehicle position and heading only when motion is indicated.
-        yaw_rate: rad per frame (+ = right / clockwise)
-        step_dist: metres advanced in this frame
-        speed_mps: current estimated speed in m/s
+        Update vehicle position and heading from EgoMotion state or arguments.
         """
-        self.current_speed_mps = speed_mps
-        self.is_moving = (speed_mps >= 0.25 and step_dist > 0.005)
-
-        # Only advance position and update route when vehicle is actually moving
-        if self.is_moving:
-            mid_heading = self.heading + 0.5 * yaw_rate
-            self.heading = (self.heading + yaw_rate) % (2.0 * math.pi)
-
-            dx = step_dist * math.sin(mid_heading)
-            dy = step_dist * math.cos(mid_heading)
-
-            self.x += dx
-            self.y += dy
-            self.total_dist += step_dist
-
-            self.metric_coords.append((self.x, self.y))
+        if len(args) == 1 and isinstance(args[0], EgoMotion):
+            ego = args[0]
+            self.x = ego.x
+            self.y = ego.y
+            self.heading = ego.heading
+            self.current_speed_mps = ego.speed_mps
+            self.is_moving = (ego.step > 0.005)
+            self.total_dist = float(sum(p[3] for p in ego.trajectory)) if ego.trajectory else 0.0
+            if ego.trajectory:
+                self.metric_coords = [(p[0], p[1]) for p in ego.trajectory]
+        else:
+            yaw_rate = args[0] if len(args) > 0 else kwargs.get("yaw_rate", 0.0)
+            step_dist = args[1] if len(args) > 1 else kwargs.get("step_dist", 0.0)
+            speed_mps = args[2] if len(args) > 2 else kwargs.get("speed_mps", step_dist * 30.0)
+            self.current_speed_mps = speed_mps
+            self.is_moving = (step_dist > 0.005)
+            if self.is_moving:
+                mid_heading = self.heading + 0.5 * yaw_rate
+                self.heading = (self.heading + yaw_rate) % (2.0 * math.pi)
+                self.x += step_dist * math.sin(mid_heading)
+                self.y += step_dist * math.cos(mid_heading)
+                self.total_dist += step_dist
+                self.metric_coords.append((self.x, self.y))
 
     def get_feature(self, coordinate_type="pixel"):
         """
@@ -565,7 +556,7 @@ def draw_bev_inset(img, clean, ego, kappa):
 
 def draw_hud(img, ego, kappa):
     radius = "straight" if abs(kappa) < 1e-4 else f"R={1 / abs(kappa):.0f} m {'right' if kappa > 0 else 'left'}"
-    speed_tag = f"speed {ego.speed_kmh:4.1f} km/h" if ego.speed_mps >= 0.25 else "speed 0.0 km/h [STOPPED]"
+    speed_tag = f"speed {ego.speed_kmh:4.1f} km/h" if ego.step >= 0.005 else "speed 0.0 km/h [STOPPED]"
     text = f"{speed_tag}  curvature {kappa * 1000:+.1f} /km  {radius}  corners {len(ego.pts)} (used {ego.n_used})"
     (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
     cv2.rectangle(img, (10, 10), (30 + tw, 52 + th - 20), (0, 0, 0), -1)
@@ -633,13 +624,15 @@ def main():
         cv2.imshow("Frame", processed_frame)
 
         # Update and render route map in separate window with dynamic speed
-        route_map.update(ego.yaw, ego.step, ego.speed_mps)
+        route_map.update(ego)
         map_img = route_map.render()
         cv2.imshow("Route Map", map_img)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
+        elif key == ord("b"):
+            show_bev = not show_bev
         elif key == ord("c"):
             show_corners = not show_corners
         elif key == ord("r"):
